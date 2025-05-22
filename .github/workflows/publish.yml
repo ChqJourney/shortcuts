@@ -1,0 +1,52 @@
+name: Publish AOT Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: write # Needed for releasing
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+        
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.3.1
+        
+    - name: Install workload
+      run: dotnet workload install wasm-tools
+      
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+      
+    - name: Publish AOT
+      run: dotnet publish -c Release -r win-x64 --self-contained true /p:PublishAot=true
+      
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: bin/Release/net9.0/win-x64/publish/scripts.exe
+        name: Release ${{ github.ref_name }}
+        body: |
+          Automated release for version ${{ github.ref_name }}
+          
+          This release contains:
+          - AOT-compiled standalone executable for Windows x64
+        draft: false
+        prerelease: false

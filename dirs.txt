@@ -1,0 +1,3 @@
+C:\Users\patri\Desktop\target
+C:\Users\patri\Desktop\backup
+C:\Users\patri\source\repos\scripts\bin\Release\net9.0\win-x64
