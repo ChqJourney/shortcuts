@@ -133,8 +133,6 @@ class Program
         var result = new List<string>();
         try
         {
-            // 添加顶级目录
-            result.Add(sourcePath);
 
             // 递归获取所有子目录
             foreach (var directory in Directory.GetDirectories(sourcePath, "*", SearchOption.TopDirectoryOnly))
