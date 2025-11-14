@@ -1,15 +1,13 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Collections.Concurrent;
 
 class Program
 {
+    [STAThread]
     static void Main(string[] args)
     {
         try 
@@ -78,16 +76,23 @@ class Program
             {
                 try
                 {
-                    if (!char.IsDigit(Path.GetFileName(directory)[0]))
+                    var folderName = Path.GetFileName(directory);
+                    if (!HasSevenDigitPrefix(folderName))
                     {
                         Console.WriteLine($"跳过: 文件夹名称不符合要求 - {directory}");
                         Interlocked.Increment(ref skipped);
                         return;
                     }
 
-                    string relativePath = Path.GetRelativePath(sourcePath, directory);
                     string shortcutName = Path.GetFileName(directory);
                     string shortcutPath = Path.Combine(targetPath, $"{shortcutName}.lnk");
+
+                    if (HasShortcutForTarget(targetPath, directory))
+                    {
+                        Console.WriteLine($"跳过: 已存在指向该目录的快捷方式 - {directory}");
+                        Interlocked.Increment(ref skipped);
+                        return;
+                    }
 
                     if (File.Exists(shortcutPath))
                     {
@@ -96,7 +101,7 @@ class Program
                         return;
                     }
 
-                    if (CreateShortcutWithPowerShell(shortcutPath, directory, $"Shortcut to {shortcutName}"))
+                    if (CreateShortcut(shortcutPath, directory, $"Shortcut to {shortcutName}"))
                     {
                         Console.WriteLine($"创建: {shortcutPath} -> {directory}");
                         Interlocked.Increment(ref created);
@@ -154,40 +159,166 @@ class Program
         return result;
     }
 
-    static bool CreateShortcutWithPowerShell(string shortcutPath, string targetPath, string description)
+    internal static bool CreateShortcut(string shortcutPath, string targetPath, string description)
     {
         try
         {
-            // 使用PowerShell创建快捷方式
-            string psCommand = $@"$WshShell = New-Object -ComObject WScript.Shell; " +
-                              $@"$Shortcut = $WshShell.CreateShortcut('{shortcutPath.Replace("'", "''")}'); " +
-                              $@"$Shortcut.TargetPath = '{targetPath.Replace("'", "''")}'; " +
-                              $@"$Shortcut.Description = '{description.Replace("'", "''")}'; " +
-                              $@"$Shortcut.Save()";
+            IShellLinkW link = (IShellLinkW)new ShellLink();
+            link.SetPath(targetPath);
 
-            // 创建PowerShell进程
-            using (Process process = new Process())
+            if (!string.IsNullOrEmpty(description))
             {
-                process.StartInfo.FileName = "powershell.exe";
-                process.StartInfo.Arguments = $"-Command \"{psCommand}\"";
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.CreateNoWindow = true;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.RedirectStandardError = true;
-                process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-                process.StartInfo.StandardErrorEncoding = Encoding.UTF8;
-
-                process.Start();
-                process.WaitForExit();
-
-                // 检查是否成功
-                return process.ExitCode == 0 && File.Exists(shortcutPath);
+                link.SetDescription(description);
             }
+
+            string workingDirectory = Path.GetDirectoryName(targetPath) ?? targetPath;
+            link.SetWorkingDirectory(workingDirectory);
+
+            IPersistFile file = (IPersistFile)link;
+            file.Save(shortcutPath, true);
+
+            return File.Exists(shortcutPath);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"创建快捷方式时出错: {ex.Message}");
             return false;
         }
+    }
+
+    internal static bool HasSevenDigitPrefix(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name.Length < 7)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < 7; i++)
+        {
+            if (!char.IsDigit(name[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static bool HasShortcutForTarget(string shortcutsRoot, string targetPath)
+    {
+        if (!Directory.Exists(shortcutsRoot))
+        {
+            return false;
+        }
+
+        string normalizedTarget = NormalizePath(targetPath);
+
+        foreach (var shortcut in Directory.EnumerateFiles(shortcutsRoot, "*.lnk", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                string? existingTarget = GetShortcutTarget(shortcut);
+                if (existingTarget is null)
+                {
+                    continue;
+                }
+
+                if (string.Equals(NormalizePath(existingTarget), normalizedTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"警告: 检查快捷方式 {shortcut} 时出错: {ex.Message}");
+            }
+        }
+
+        return false;
+    }
+
+    internal static string? GetShortcutTarget(string shortcutPath)
+    {
+        if (!File.Exists(shortcutPath))
+        {
+            return null;
+        }
+
+        IShellLinkW link = (IShellLinkW)new ShellLink();
+        IPersistFile file = (IPersistFile)link;
+        file.Load(shortcutPath, 0);
+
+        StringBuilder buffer = new StringBuilder(1024);
+        link.GetPath(buffer, buffer.Capacity, out var data, 0);
+        string target = buffer.ToString();
+
+        return string.IsNullOrWhiteSpace(target) ? null : target;
+    }
+
+    internal static string NormalizePath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        return fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WIN32_FIND_DATAW
+    {
+        public uint dwFileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftLastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftLastWriteTime;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+        public uint dwReserved0;
+        public uint dwReserved1;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string cFileName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
+        public string cAlternate;
+    }
+
+    [ComImport]
+    [Guid("00021401-0000-0000-C000-000000000046")]
+    private class ShellLink
+    {
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("000214F9-0000-0000-C000-000000000046")]
+    private interface IShellLinkW
+    {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cchMaxPath, out WIN32_FIND_DATAW pfd, uint fFlags);
+        void GetIDList(out IntPtr ppidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cchMaxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cchMaxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cchMaxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+        void GetHotkey(out short pwHotkey);
+        void SetHotkey(short wHotkey);
+        void GetShowCmd(out int piShowCmd);
+        void SetShowCmd(int iShowCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cchIconPath, out int piIcon);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+        void Resolve(IntPtr hwnd, uint fFlags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("0000010B-0000-0000-C000-000000000046")]
+    private interface IPersistFile
+    {
+        void GetClassID(out Guid pClassID);
+        void IsDirty();
+        void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+        void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, [MarshalAs(UnmanagedType.Bool)] bool fRemember);
+        void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+        void GetCurFile([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFileName);
     }
 }
